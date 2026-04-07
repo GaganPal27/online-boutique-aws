@@ -83,6 +83,7 @@ jobs:
           # Each key maps a logical service name to its watch paths.
           # protos/ is listed for EVERY service because a proto change
           # requires ALL services that use gRPC to be rebuilt.
+          base: ${{ github.ref_name }}
           filters: |
             frontend:
               - 'src/frontend/**'
