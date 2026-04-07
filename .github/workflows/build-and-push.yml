@@ -64,8 +64,9 @@ jobs:
     name: Detect Changed Services
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.filter.outputs.changes }}
-      any_changed: ${{ steps.filter.outputs.any_changed }}
+      # We manually provide the list of all 11 services to bypass the filter
+      matrix: '["frontend", "cartservice", "productcatalogservice", "currencyservice", "paymentservice", "shippingservice", "emailservice", "checkoutservice", "recommendationservice", "adservice", "loadgenerator"]'
+      any_changed: 'true'
 
     steps:
       - name: Checkout repository
