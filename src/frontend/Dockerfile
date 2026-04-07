@@ -21,9 +21,12 @@ ARG TARGETARCH=amd64
 WORKDIR /src
 
 # restore dependencies
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
+# Change this:
+COPY src/frontend/go.mod src/frontend/go.sum ./
+
+# And these later in the file:
+COPY src/frontend/templates ./templates
+COPY src/frontend/static ./static
 
 # Skaffold passes in debug-oriented compiler flags
 ARG SKAFFOLD_GO_GCFLAGS
