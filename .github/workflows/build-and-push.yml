@@ -1,0 +1,267 @@
+###############################################################################
+# .github/workflows/build-and-push.yml
+#
+# Phase 3 — CI/CD: Build & Push Docker images to Amazon ECR
+#
+# Pro techniques demonstrated:
+#   1. OIDC Authentication  — no long-lived AWS secrets stored in GitHub
+#   2. Path Filtering       — only rebuild a service when ITS source changes
+#   3. Matrix Strategy      — one DRY workflow file handles all 11 services
+#   4. protos/ build context— gRPC definitions baked in at build time
+#   5. Layer caching        — GitHub Actions cache speeds up repeat builds
+#   6. SHA + latest tagging — immutable SHA for CD traceability, latest for dev
+###############################################################################
+
+name: Build and Push to ECR
+
+on:
+  push:
+    branches:
+      - main
+      - "release/**"
+    paths:
+      # Only run if something inside src/ or protos/ actually changed.
+      # A README-only change won't burn CI minutes.
+      - "src/**"
+      - "protos/**"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "protos/**"
+
+  # Allow manual trigger from the Actions tab for any service.
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Service to build (leave blank to build all changed services)"
+        required: false
+        default: ""
+
+###############################################################################
+# Permissions — required for OIDC token request
+###############################################################################
+permissions:
+  id-token: write   # Request OIDC JWT from GitHub's IdP
+  contents: read    # Checkout the repository
+
+###############################################################################
+# Environment variables — single source of truth for AWS config
+###############################################################################
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY_ALIAS: online-boutique   # matches var.project_name in Terraform
+
+jobs:
+  ###########################################################################
+  # Job 1 — detect-changes
+  # Runs path-filter to produce a JSON matrix of only the services that
+  # have changed. The build job reads this matrix and creates one parallel
+  # runner per changed service.
+  ###########################################################################
+  detect-changes:
+    name: Detect Changed Services
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.filter.outputs.changes }}
+      any_changed: ${{ steps.filter.outputs.any_changed }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Full history needed for accurate diff detection on PRs.
+          fetch-depth: 0
+
+      # dorny/paths-filter compares HEAD vs base-branch and emits a JSON
+      # array of the filter keys that matched — e.g. ["frontend","emailservice"]
+      - name: Detect which services changed
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          # Each key maps a logical service name to its watch paths.
+          # protos/ is listed for EVERY service because a proto change
+          # requires ALL services that use gRPC to be rebuilt.
+          filters: |
+            frontend:
+              - 'src/frontend/**'
+              - 'protos/**'
+            cartservice:
+              - 'src/cartservice/**'
+              - 'protos/**'
+            productcatalogservice:
+              - 'src/productcatalogservice/**'
+              - 'protos/**'
+            currencyservice:
+              - 'src/currencyservice/**'
+              - 'protos/**'
+            paymentservice:
+              - 'src/paymentservice/**'
+              - 'protos/**'
+            shippingservice:
+              - 'src/shippingservice/**'
+              - 'protos/**'
+            emailservice:
+              - 'src/emailservice/**'
+              - 'protos/**'
+            checkoutservice:
+              - 'src/checkoutservice/**'
+              - 'protos/**'
+            recommendationservice:
+              - 'src/recommendationservice/**'
+              - 'protos/**'
+            adservice:
+              - 'src/adservice/**'
+              - 'protos/**'
+            loadgenerator:
+              - 'src/loadgenerator/**'
+              - 'protos/**'
+
+  ###########################################################################
+  # Job 2 — build-and-push
+  # Runs in parallel, one runner per changed service.
+  # matrix.service is a string from the JSON array emitted by detect-changes.
+  ###########################################################################
+  build-and-push:
+    name: Build & Push — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: detect-changes
+
+    # Only run if at least one service changed.
+    if: ${{ needs.detect-changes.outputs.any_changed == 'true' }}
+
+    strategy:
+      # Do not cancel sibling jobs if one service fails.
+      # You want the other 10 services to still push successfully.
+      fail-fast: false
+      matrix:
+        # fromJson converts the JSON string from detect-changes into a matrix.
+        # GitHub spins up one parallel runner for each element.
+        service: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout — shallow clone is fine here; we already did the diff above
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # 2. Configure AWS credentials via OIDC (no secrets stored in GitHub)
+      #    AWS_ROLE_ARN must be set in:
+      #    Settings → Secrets and variables → Actions → New repository secret
+      #    Value: the output of `terraform output github_actions_role_arn`
+      # -----------------------------------------------------------------------
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: GitHubActions-${{ matrix.service }}-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # -----------------------------------------------------------------------
+      # 3. Log in to ECR
+      #    Outputs the registry URL as `registry` for use in later steps.
+      # -----------------------------------------------------------------------
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # -----------------------------------------------------------------------
+      # 4. Set up Docker Buildx — enables BuildKit for layer caching + multi-
+      #    platform builds (useful if you later target arm64 Graviton nodes).
+      # -----------------------------------------------------------------------
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # -----------------------------------------------------------------------
+      # 5. Restore layer cache from GitHub Actions Cache
+      #    Cache key includes the service name + a hash of its source files
+      #    so that changing emailservice doesn't invalidate frontend's cache.
+      # -----------------------------------------------------------------------
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache-${{ matrix.service }}
+          key: ${{ runner.os }}-buildx-${{ matrix.service }}-${{ hashFiles(format('src/{0}/**', matrix.service), 'protos/**') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-${{ matrix.service }}-
+
+      # -----------------------------------------------------------------------
+      # 6. Construct image metadata
+      #    IMAGE_URI  = full ECR path used for docker push
+      #    Short SHA  = first 7 chars of the commit hash (readable in EKS logs)
+      # -----------------------------------------------------------------------
+      - name: Set image metadata
+        id: meta
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          REGISTRY="${ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          REPO="${{ env.ECR_REGISTRY_ALIAS }}/${{ matrix.service }}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+
+          echo "registry=${REGISTRY}"               >> $GITHUB_OUTPUT
+          echo "image_uri=${REGISTRY}/${REPO}"      >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}"             >> $GITHUB_OUTPUT
+          echo "tag_sha=${GITHUB_SHA}"              >> $GITHUB_OUTPUT
+
+      # -----------------------------------------------------------------------
+      # 7. Build and push
+      #
+      #    Build context strategy — CRITICAL for protos/:
+      #    We set context to the REPO ROOT (.) so Docker can see both:
+      #      src/<service>/       — the service's application code
+      #      protos/              — the shared gRPC .proto definitions
+      #
+      #    Each service's Dockerfile must therefore reference protos/ as:
+      #      COPY protos/ /app/protos/
+      #    and src/<service>/ as:
+      #      COPY src/<service>/ /app/
+      #
+      #    Two tags are pushed:
+      #      <SHA>   — immutable, used by Helm/CD to pin a specific build
+      #      latest  — floating, convenient for dev/debugging
+      # -----------------------------------------------------------------------
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          # Root of the repo — gives Docker access to both src/ and protos/
+          context: .
+          # Point to the service-specific Dockerfile
+          file: src/${{ matrix.service }}/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}   # don't push on PRs, only build
+          tags: |
+            ${{ steps.meta.outputs.image_uri }}:${{ steps.meta.outputs.tag_sha }}
+            ${{ steps.meta.outputs.image_uri }}:latest
+          # Pass build args so Dockerfiles can embed the commit SHA in the binary
+          build-args: |
+            COMMIT_SHA=${{ github.sha }}
+          # Wire BuildKit cache to the GitHub Actions cache restored above
+          cache-from: type=local,src=/tmp/.buildx-cache-${{ matrix.service }}
+          cache-to: type=local,dest=/tmp/.buildx-cache-${{ matrix.service }}-new,mode=max
+
+      # -----------------------------------------------------------------------
+      # 8. Rotate the cache directory
+      #    Without this, the cache grows unboundedly. We move the new cache
+      #    into place and delete the old one after every successful build.
+      # -----------------------------------------------------------------------
+      - name: Rotate build cache
+        run: |
+          rm -rf /tmp/.buildx-cache-${{ matrix.service }}
+          mv /tmp/.buildx-cache-${{ matrix.service }}-new /tmp/.buildx-cache-${{ matrix.service }}
+
+      # -----------------------------------------------------------------------
+      # 9. Print a summary — visible in the GitHub Actions run summary page
+      # -----------------------------------------------------------------------
+      - name: Print image summary
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          echo "### ✅ Image pushed successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field        | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Service**  | \`${{ matrix.service }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **SHA tag**  | \`${{ steps.meta.outputs.tag_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image URI**| \`${{ steps.meta.outputs.image_uri }}:${{ steps.meta.outputs.tag_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+
