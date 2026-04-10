@@ -1,18 +1,3 @@
-# Copyright 2020 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#      http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-# Define a default value so it's not empty if the builder fails to provide it
 ARG BUILDPLATFORM=linux/amd64
 
 FROM --platform=$BUILDPLATFORM python:3.14.3-alpine@sha256:faee120f7885a06fcc9677922331391fa690d911c020abb9e8025ff3d908e510 AS base
@@ -26,9 +11,11 @@ RUN apk update \
     && apk add --no-cache g++ linux-headers \
     && rm -rf /var/cache/apk/*
 
-# get packages
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+WORKDIR /app
+
+# 1. Copy requirements from the subfolder
+COPY src/recommendationservice/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 FROM base
 
@@ -39,18 +26,19 @@ RUN apk update \
     && apk add --no-cache libstdc++ \
     && rm -rf /var/cache/apk/*
 
-# get packages
 WORKDIR /recommendationservice
 
-# Grab packages from builder
+# 2. Grab packages from builder
 COPY --from=builder /usr/local/lib/python3.14/ /usr/local/lib/python3.14/
 
-# Add the application
-COPY . .
+# 3. Add the application code from the subfolder
+COPY src/recommendationservice/ .
 
-# set listen port
+# 4. Copy protos (Recommendation service uses these for gRPC communication)
+COPY protos/ ./protos/
+
+# Set listen port
 ENV PORT="8080"
 EXPOSE 8080
 
 ENTRYPOINT ["python", "recommendation_server.py"]
-# force-build

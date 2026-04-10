@@ -1,21 +1,10 @@
-# Copyright 2020 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#      http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright 2021 Google LLC
+# Licensed under the Apache License, Version 2.0
 
-# Define a default value so it's not empty if the builder fails to provide it
 ARG BUILDPLATFORM=linux/amd64
 
-FROM --platform=$BUILDPLATFORM python:3.14.3-alpine@sha256:faee120f7885a06fcc9677922331391fa690d911c020abb9e8025ff3d908e510 AS base
+# Using Python 3.12 for better stability with gRPC on Alpine
+FROM --platform=$BUILDPLATFORM python:3.12-alpine AS base
 
 FROM base AS builder
 
@@ -26,16 +15,16 @@ RUN apk update \
     && apk add --no-cache g++ linux-headers \
     && rm -rf /var/cache/apk/*
 
-# get packages
+WORKDIR /app
+
+# 1. Copy requirements from the current directory (the service folder)
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 FROM base
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-
-# Enable Profiler
 ENV ENABLE_PROFILER=1
 
 RUN apk update \
@@ -44,13 +33,14 @@ RUN apk update \
 
 WORKDIR /email_server
 
-# Grab packages from builder
-COPY --from=builder /usr/local/lib/python3.14/ /usr/local/lib/python3.14/
+# 2. Grab packages from builder stage
+COPY --from=builder /install /usr/local
 
-# Add the application
+# 3. Add the application code from the current directory
 COPY . .
+
+# 4. Ensure protos are accessible if they were moved into this folder
+# COPY protos/ ./protos/
 
 EXPOSE 8080
 ENTRYPOINT [ "python", "email_server.py" ]
-# force-build
-###
