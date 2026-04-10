@@ -1,6 +1,10 @@
+# Copyright 2021 Google LLC
+# Licensed under the Apache License, Version 2.0
+
 ARG BUILDPLATFORM=linux/amd64
 
-FROM --platform=$BUILDPLATFORM python:3.14.3-alpine@sha256:faee120f7885a06fcc9677922331391fa690d911c020abb9e8025ff3d908e510 AS base
+# Use Python 3.12 (Stable) for better Alpine compatibility
+FROM --platform=$BUILDPLATFORM python:3.12-alpine AS base
 
 FROM base AS builder
 
@@ -13,9 +17,9 @@ RUN apk update \
 
 WORKDIR /app
 
-# 1. Copy requirements from the subfolder
-COPY src/recommendationservice/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# 1. FIXED: Copy relative to the context root
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 FROM base
 
@@ -28,14 +32,14 @@ RUN apk update \
 
 WORKDIR /recommendationservice
 
-# 2. Grab packages from builder
-COPY --from=builder /usr/local/lib/python3.14/ /usr/local/lib/python3.14/
+# 2. FIXED: Grab packages using prefix for reliability
+COPY --from=builder /install /usr/local
 
-# 3. Add the application code from the subfolder
-COPY src/recommendationservice/ .
+# 3. FIXED: Add the application code from current context
+COPY . .
 
-# 4. Copy protos (Recommendation service uses these for gRPC communication)
-COPY protos/ ./protos/
+# 4. NOTE: Protos must be inside src/recommendationservice/ for Docker to see them
+# COPY protos/ ./protos/
 
 # Set listen port
 ENV PORT="8080"
