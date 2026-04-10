@@ -6,19 +6,18 @@ WORKDIR /app
 COPY src/adservice/build.gradle src/adservice/gradlew ./
 COPY src/adservice/gradle gradle
 
-# 2. Grant execution rights and download dependencies
-RUN chmod +x gradlew
-RUN ./gradlew downloadRepos
-
-# 3. IMPORTANT: Copy the SHARED protos folder from the root
-# AdService needs this to generate gRPC code!
+# 2. IMPORTANT: Copy the SHARED protos folder
 COPY protos/ /app/protos/
 
-# 4. Copy the service source code
+# 3. Copy the rest of the source code
 COPY src/adservice/ .
 
+# 4. FIX PERMISSIONS & LINE ENDINGS
+# We do this after all copies to ensure the 'x' bit stays set
+# 'sed' removes Windows line endings that break scripts on Linux
+RUN sed -i 's/\r$//' gradlew && chmod +x gradlew
+
 # 5. Build the application
-# If this fails, it usually tells you exactly which file is missing
 RUN ./gradlew installDist
 
 # Final Stage
