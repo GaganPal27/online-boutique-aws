@@ -1,14 +1,8 @@
-# Copyright 2021 Google LLC
-# Licensed under the Apache License, Version 2.0
-
-ARG BUILDPLATFORM=linux/amd64
-
 # Builder Stage
-FROM --platform=$BUILDPLATFORM eclipse-temurin:21-jdk-noble AS builder
-
+FROM eclipse-temurin:21-jdk-noble AS builder
 WORKDIR /app
 
-# 1. FIXED: Copy Gradle wrapper and config from the specific service subfolder
+# 1. Copy Gradle wrapper and config
 COPY src/adservice/build.gradle src/adservice/gradlew ./
 COPY src/adservice/gradle gradle
 
@@ -16,18 +10,20 @@ COPY src/adservice/gradle gradle
 RUN chmod +x gradlew
 RUN ./gradlew downloadRepos
 
-# 3. FIXED: Copy the rest of the source code from the service subfolder
+# 3. IMPORTANT: Copy the SHARED protos folder from the root
+# AdService needs this to generate gRPC code!
+COPY protos/ /app/protos/
+
+# 4. Copy the service source code
 COPY src/adservice/ .
 
-# 4. Build the application
+# 5. Build the application
+# If this fails, it usually tells you exactly which file is missing
 RUN ./gradlew installDist
 
-# --- Final Stage ---
+# Final Stage
 FROM eclipse-temurin:21-jre-alpine
-
 WORKDIR /app
-
-# 5. Copy the built application from the builder stage
 COPY --from=builder /app/build/install/hipstershop /app
 
 EXPOSE 9555
