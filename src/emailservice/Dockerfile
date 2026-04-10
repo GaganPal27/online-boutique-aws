@@ -17,8 +17,8 @@ RUN apk update \
 
 WORKDIR /app
 
-# 1. Copy requirements from the current directory (the service folder)
-COPY requirements.txt .
+# 1. Copy requirements from the specific subfolder in the build context
+COPY src/emailservice/requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 FROM base
@@ -36,10 +36,11 @@ WORKDIR /email_server
 # 2. Grab packages from builder stage
 COPY --from=builder /install /usr/local
 
-# 3. Add the application code from the current directory
-COPY . .
+# 3. Add the application code from the service subfolder
+COPY src/emailservice/ .
 
-# 4. Ensure protos are accessible if they were moved into this folder
+# 4. If your protos are located in the service folder, they are already copied by step 3.
+# If they are in a global root folder, use the line below:
 # COPY protos/ ./protos/
 
 EXPOSE 8080
