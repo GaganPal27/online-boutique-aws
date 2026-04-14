@@ -1,18 +1,27 @@
 ###############################################################################
-# eks.tf
-# Production-grade EKS cluster with Managed Node Groups
-# Uses: terraform-aws-modules/eks/aws (v20.x)
+# eks.tf  —  Phase 4
+#
+# Module : terraform-aws-modules/eks/aws  ~> 20.8
+#
+# Design decisions vs Phase 1:
+#   • Single managed node group (t3.medium, min 2 / max 5) — cost-optimised
+#     for a portfolio cluster while still demonstrating autoscaling capability.
+#   • enable_cluster_creator_admin_permissions = true — grants system:masters
+#     to the IAM identity running terraform apply (your laptop / CI role).
+#     No manual aws-auth ConfigMap edits needed.
+#   • IRSA roles pre-created for VPC CNI, EBS CSI, and AWS LBC so Phase 4
+#     Helm deploys work without any extra IAM work.
+#   • Cluster endpoint is public so you can run kubectl from your laptop.
+#     Restrict cluster_endpoint_public_access_cidrs to your IP in production.
 ###############################################################################
 
 ###############################################################################
-# Data sources
+# Resolve the caller's AWS Account ID (used in IAM ARNs below)
 ###############################################################################
-
-# Resolve the caller's AWS account ID — used in IAM ARNs.
 data "aws_caller_identity" "current" {}
 
 ###############################################################################
-# EKS Module
+# EKS Cluster
 ###############################################################################
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
@@ -21,23 +30,22 @@ module "eks" {
   cluster_name    = "${var.project_name}-eks"
   cluster_version = "1.29"
 
-  # Deploy the EKS control plane into the private subnets.
+  # Deploy control plane into private subnets — worker nodes follow suit.
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
 
-  # Make the API server publicly reachable so you can run kubectl from your
-  # laptop.  Lock this down to your office/home CIDR in production.
+  # Public endpoint lets you run kubectl from your laptop without a VPN.
+  # In a real production cluster, lock this to your office CIDR.
   cluster_endpoint_public_access       = true
-  cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"] # ← tighten in prod
+  cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"]  # ← tighten in prod
 
-  # Encrypt etcd secrets with a CMK.
+  # Encrypt Kubernetes secrets in etcd with a CMK.
   cluster_encryption_config = {
     resources = ["secrets"]
   }
 
-  # ---------------------------------------------------------------------------
-  # Core add-ons — managed and kept up to date by AWS.
-  # ---------------------------------------------------------------------------
+  # ── Managed Add-ons ───────────────────────────────────────────────────────
+  # AWS keeps these patched and they integrate cleanly with IRSA.
   cluster_addons = {
     coredns = {
       most_recent = true
@@ -47,11 +55,12 @@ module "eks" {
     }
     vpc-cni = {
       most_recent              = true
-      before_compute           = true          # must exist before nodes join
+      before_compute           = true   # must exist before nodes join the cluster
       service_account_role_arn = module.vpc_cni_irsa.iam_role_arn
       configuration_values = jsonencode({
         env = {
-          # Enable prefix delegation for higher pod density.
+          # Prefix delegation: raises pod density per node from ~29 → ~110
+          # on a t3.medium without changing instance type.
           ENABLE_PREFIX_DELEGATION = "true"
           WARM_PREFIX_TARGET       = "1"
         }
@@ -63,41 +72,22 @@ module "eks" {
     }
   }
 
-  # ---------------------------------------------------------------------------
-  # Managed Node Groups
-  # Two groups:
-  #   • system  — small, on-demand nodes for cluster add-ons & controllers
-  #   • app     — larger, mixed on-demand + Spot nodes for the microservices
-  # ---------------------------------------------------------------------------
+  # ── Managed Node Group ────────────────────────────────────────────────────
+  # Single group: t3.medium (2 vCPU / 4 GB RAM) — sufficient to run all 11
+  # Online Boutique microservices concurrently with headroom to spare.
+  # Autoscales between 2 (HA baseline) and 5 nodes.
   eks_managed_node_groups = {
+    main = {
+      name           = "${var.project_name}-ng"
+      instance_types = ["t3.medium"]
+      ami_type       = "AL2_x86_64"
+      capacity_type  = "ON_DEMAND"   # switch to SPOT for further savings
 
-    # ------------------------------------------------------------------
-    # System node group  (always on-demand, tainted so only system pods
-    # land here)
-    # ------------------------------------------------------------------
-    system = {
-      name            = "system"
-      instance_types  = ["t3.medium"]
-      ami_type        = "AL2_x86_64"
-      capacity_type   = "ON_DEMAND"
+      min_size     = 2   # always 2 for availability (one per AZ)
+      max_size     = 5   # HPA / Cluster Autoscaler can burst to 5
+      desired_size = 2   # cold-start at minimum
 
-      min_size     = 1
-      max_size     = 3
-      desired_size = 2
-
-      taints = [
-        {
-          key    = "CriticalAddonsOnly"
-          value  = "true"
-          effect = "NO_SCHEDULE"
-        }
-      ]
-
-      labels = {
-        role = "system"
-      }
-
-      # EBS root volume — 50 GB gp3 for system nodes.
+      # gp3 root volume — better IOPS/throughput per dollar than gp2.
       block_device_mappings = {
         xvda = {
           device_name = "/dev/xvda"
@@ -109,45 +99,17 @@ module "eks" {
           }
         }
       }
-    }
-
-    # ------------------------------------------------------------------
-    # Application node group  (Spot + on-demand mix; hosts all 11 services)
-    # ------------------------------------------------------------------
-    app = {
-      name = "app"
-      # Multiple instance families → Spot diversification.
-      instance_types = ["m5.large", "m5a.large", "m5d.large", "m6i.large"]
-      ami_type       = "AL2_x86_64"
-      capacity_type  = "SPOT"
-
-      min_size     = 2
-      max_size     = 10
-      desired_size = 3
 
       labels = {
         role = "app"
       }
-
-      # EBS root volume — 100 GB gp3 for app nodes.
-      block_device_mappings = {
-        xvda = {
-          device_name = "/dev/xvda"
-          ebs = {
-            volume_size           = 100
-            volume_type           = "gp3"
-            encrypted             = true
-            delete_on_termination = true
-          }
-        }
-      }
     }
   }
 
-  # ---------------------------------------------------------------------------
-  # Grant the caller (you / CI) admin access on the cluster via the EKS access
-  # API (replaces the legacy aws-auth ConfigMap).
-  # ---------------------------------------------------------------------------
+  # ── IAM Access ────────────────────────────────────────────────────────────
+  # Grants system:masters to the identity that runs terraform apply.
+  # This replaces the legacy aws-auth ConfigMap approach and works with both
+  # IAM users and assumed roles (e.g. your GitHub Actions OIDC role).
   enable_cluster_creator_admin_permissions = true
 
   tags = {
@@ -157,10 +119,11 @@ module "eks" {
 
 ###############################################################################
 # IRSA — IAM Roles for Service Accounts
-# Allows pods to assume scoped IAM roles without long-lived credentials.
+# Each pod gets a scoped IAM role injected via a projected token.
+# Zero long-lived credentials stored anywhere in the cluster.
 ###############################################################################
 
-# VPC CNI IRSA — needed to manage ENIs/prefix delegations.
+# VPC CNI — manages ENIs and IP prefix delegation on each node.
 module "vpc_cni_irsa" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "~> 5.39"
@@ -177,7 +140,7 @@ module "vpc_cni_irsa" {
   }
 }
 
-# EBS CSI IRSA — allows the EBS CSI driver to manage EBS volumes.
+# EBS CSI Driver — provisions and attaches EBS volumes for PersistentVolumeClaims.
 module "ebs_csi_irsa" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "~> 5.39"
@@ -193,12 +156,13 @@ module "ebs_csi_irsa" {
   }
 }
 
-# AWS Load Balancer Controller IRSA — used in Phase 4.
+# AWS Load Balancer Controller — provisions ALBs/NLBs for Kubernetes Ingress
+# and Service objects. Required for Phase 4 Helm deployment.
 module "aws_lb_controller_irsa" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "~> 5.39"
 
-  role_name                              = "${var.project_name}-aws-lb-controller-irsa"
+  role_name                              = "${var.project_name}-aws-lbc-irsa"
   attach_load_balancer_controller_policy = true
 
   oidc_providers = {
@@ -207,38 +171,4 @@ module "aws_lb_controller_irsa" {
       namespace_service_accounts = ["kube-system:aws-load-balancer-controller"]
     }
   }
-}
-
-###############################################################################
-# Outputs — consumed by Phase 2 (ECR), Phase 3 (CI/CD), Phase 4 (Helm)
-###############################################################################
-output "cluster_name" {
-  description = "EKS cluster name."
-  value       = module.eks.cluster_name
-}
-
-output "cluster_endpoint" {
-  description = "EKS API server endpoint."
-  value       = module.eks.cluster_endpoint
-}
-
-output "cluster_certificate_authority_data" {
-  description = "Base64-encoded CA data for the cluster."
-  value       = module.eks.cluster_certificate_authority_data
-  sensitive   = true
-}
-
-output "oidc_provider_arn" {
-  description = "OIDC provider ARN — used for IRSA in Phase 4."
-  value       = module.eks.oidc_provider_arn
-}
-
-output "aws_lb_controller_role_arn" {
-  description = "IAM role ARN for the AWS Load Balancer Controller (Phase 4)."
-  value       = module.aws_lb_controller_irsa.iam_role_arn
-}
-
-output "configure_kubectl" {
-  description = "Run this command to configure kubectl after apply."
-  value       = "aws eks update-kubeconfig --region ${var.aws_region} --name ${module.eks.cluster_name}"
 }
