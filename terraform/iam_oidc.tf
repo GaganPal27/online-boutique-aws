@@ -134,19 +134,3 @@ resource "aws_iam_role_policy_attachment" "github_actions_ecr" {
   policy_arn = aws_iam_policy.github_actions_ecr.arn
 }
 
-###############################################################################
-# Outputs
-###############################################################################
-
-# This ARN is the ONLY value you need to copy into GitHub.
-# Add it as a repository secret named: AWS_ROLE_ARN
-# Settings → Secrets and variables → Actions → New repository secret
-output "github_actions_role_arn" {
-  description = "IAM Role ARN to paste into GitHub repo secret AWS_ROLE_ARN."
-  value       = aws_iam_role.github_actions.arn
-}
-
-output "github_actions_role_name" {
-  description = "IAM Role name (useful for auditing in the AWS console)."
-  value       = aws_iam_role.github_actions.name
-}
