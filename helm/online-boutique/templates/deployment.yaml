@@ -1,0 +1,118 @@
+{{/*
+  templates/deployment.yaml
+  Renders one Deployment per entry in .Values.services using a range loop.
+  This is the DRY equivalent of 11 separate YAML files.
+*/}}
+{{- range $name, $svc := .Values.services }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Values.global.namespace }}
+  labels:
+    app: {{ $name }}
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/part-of: online-boutique
+    helm.sh/chart: {{ $.Chart.Name }}-{{ $.Chart.Version }}
+spec:
+  replicas: {{ $svc.replicas }}
+  selector:
+    matchLabels:
+      app: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}
+        app.kubernetes.io/name: {{ $name }}
+    spec:
+      # Spread pods across nodes for HA — if one node goes down,
+      # the other replica on a different node keeps serving traffic.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: {{ $name }}
+
+      # Security context — run as non-root for every service.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+
+      containers:
+        - name: {{ $name }}
+          image: "{{ $.Values.global.imageRegistry }}/{{ $.Values.global.imageNamespace }}/{{ $svc.image.name }}:{{ $svc.image.tag }}"
+          imagePullPolicy: {{ $.Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ $svc.port }}
+              protocol: TCP
+          {{- if $svc.env }}
+          env:
+            {{- toYaml $svc.env | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml $svc.resources | nindent 12 }}
+          # Liveness probe — restarts the pod if it stops responding.
+          livenessProbe:
+            grpc:
+              port: {{ $svc.port }}
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 3
+          # Readiness probe — removes the pod from Service endpoints until ready.
+          readinessProbe:
+            grpc:
+              port: {{ $svc.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+{{- end }}
+
+{{/*
+  Redis Deployment — rendered separately (not part of the services map)
+*/}}
+{{- if .Values.redis.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-cart
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: redis-cart
+    app.kubernetes.io/part-of: online-boutique
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-cart
+  template:
+    metadata:
+      labels:
+        app: redis-cart
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+      containers:
+        - name: redis
+          image: {{ .Values.redis.image }}
+          ports:
+            - containerPort: {{ .Values.redis.port }}
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+{{- end }}

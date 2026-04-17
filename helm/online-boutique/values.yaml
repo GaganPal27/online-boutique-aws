@@ -1,0 +1,302 @@
+###############################################################################
+# values.yaml  —  Online Boutique Helm Chart
+#
+# This is the SINGLE SOURCE OF TRUTH for the entire deployment.
+# The CI/CD pipeline overrides `services.<name>.image.tag` at deploy time
+# using:  --set services.frontend.image.tag=<GIT_SHA>
+#
+# Structure:
+#   global        → settings shared by all services
+#   services      → per-service image, replicas, resources, ports, env
+#   ingress       → AWS ALB Ingress for the frontend
+###############################################################################
+
+###############################################################################
+# Global — shared across all service templates
+###############################################################################
+global:
+  # Your AWS Account ID + region stem.
+  # Override via:  --set global.imageRegistry=<account>.dkr.ecr.<region>.amazonaws.com
+  imageRegistry: "ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com"
+  imageNamespace: "online-boutique"
+
+  # Default pull policy. CI sets tag = SHA so Always is correct.
+  imagePullPolicy: Always
+
+  # Kubernetes namespace all resources land in.
+  namespace: online-boutique
+
+###############################################################################
+# Services — one entry per microservice
+# Each entry is consumed by the templates in templates/
+###############################################################################
+services:
+
+  # ── Frontend ───────────────────────────────────────────────────────────────
+  frontend:
+    image:
+      name: frontend
+      tag: latest          # overridden by CI: --set services.frontend.image.tag=<SHA>
+    replicas: 2
+    port: 8080
+    env:
+      - name: PORT
+        value: "8080"
+      - name: PRODUCT_CATALOG_SERVICE_ADDR
+        value: "productcatalogservice:3550"
+      - name: CURRENCY_SERVICE_ADDR
+        value: "currencyservice:7000"
+      - name: CART_SERVICE_ADDR
+        value: "cartservice:7070"
+      - name: RECOMMENDATION_SERVICE_ADDR
+        value: "recommendationservice:8080"
+      - name: SHIPPING_SERVICE_ADDR
+        value: "shippingservice:50051"
+      - name: CHECKOUT_SERVICE_ADDR
+        value: "checkoutservice:5050"
+      - name: AD_SERVICE_ADDR
+        value: "adservice:9555"
+      - name: SHOPPING_ASSISTANT_SERVICE_ADDR
+        value: ""
+      - name: ENV_PLATFORM
+        value: "aws"
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "128Mi"
+
+  # ── Cart Service ───────────────────────────────────────────────────────────
+  cartservice:
+    image:
+      name: cartservice
+      tag: latest
+    replicas: 2
+    port: 7070
+    env:
+      - name: REDIS_ADDR
+        value: "redis-cart:6379"
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "64Mi"
+      limits:
+        cpu: "300m"
+        memory: "128Mi"
+
+  # ── Product Catalog Service ────────────────────────────────────────────────
+  productcatalogservice:
+    image:
+      name: productcatalogservice
+      tag: latest
+    replicas: 2
+    port: 3550
+    env: []
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "128Mi"
+
+  # ── Currency Service ───────────────────────────────────────────────────────
+  currencyservice:
+    image:
+      name: currencyservice
+      tag: latest
+    replicas: 2
+    port: 7000
+    env: []
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "128Mi"
+
+  # ── Payment Service ────────────────────────────────────────────────────────
+  paymentservice:
+    image:
+      name: paymentservice
+      tag: latest
+    replicas: 2
+    port: 50051
+    env: []
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "128Mi"
+
+  # ── Shipping Service ───────────────────────────────────────────────────────
+  shippingservice:
+    image:
+      name: shippingservice
+      tag: latest
+    replicas: 2
+    port: 50051
+    env: []
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "128Mi"
+
+  # ── Email Service ──────────────────────────────────────────────────────────
+  emailservice:
+    image:
+      name: emailservice
+      tag: latest
+    replicas: 2
+    port: 8080
+    env:
+      - name: PORT
+        value: "8080"
+      - name: DISABLE_PROFILER
+        value: "1"
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "128Mi"
+
+  # ── Checkout Service ───────────────────────────────────────────────────────
+  checkoutservice:
+    image:
+      name: checkoutservice
+      tag: latest
+    replicas: 2
+    port: 5050
+    env:
+      - name: PRODUCT_CATALOG_SERVICE_ADDR
+        value: "productcatalogservice:3550"
+      - name: SHIPPING_SERVICE_ADDR
+        value: "shippingservice:50051"
+      - name: PAYMENT_SERVICE_ADDR
+        value: "paymentservice:50051"
+      - name: EMAIL_SERVICE_ADDR
+        value: "emailservice:8080"
+      - name: CURRENCY_SERVICE_ADDR
+        value: "currencyservice:7000"
+      - name: CART_SERVICE_ADDR
+        value: "cartservice:7070"
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "128Mi"
+
+  # ── Recommendation Service ─────────────────────────────────────────────────
+  recommendationservice:
+    image:
+      name: recommendationservice
+      tag: latest
+    replicas: 2
+    port: 8080
+    env:
+      - name: PORT
+        value: "8080"
+      - name: PRODUCT_CATALOG_SERVICE_ADDR
+        value: "productcatalogservice:3550"
+      - name: DISABLE_PROFILER
+        value: "1"
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "128Mi"
+
+  # ── Ad Service ─────────────────────────────────────────────────────────────
+  adservice:
+    image:
+      name: adservice
+      tag: latest
+    replicas: 2
+    port: 9555
+    env:
+      - name: PORT
+        value: "9555"
+      - name: DISABLE_STATS
+        value: "1"
+      - name: DISABLE_TRACING
+        value: "1"
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "180Mi"
+      limits:
+        cpu: "300m"
+        memory: "300Mi"
+
+  # ── Load Generator ─────────────────────────────────────────────────────────
+  loadgenerator:
+    image:
+      name: loadgenerator
+      tag: latest
+    replicas: 1             # only 1 — it's a traffic simulator, not HA
+    port: 8089
+    env:
+      - name: FRONTEND_ADDR
+        value: "frontend:8080"
+      - name: USERS
+        value: "10"
+    resources:
+      requests:
+        cpu: "300m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+
+###############################################################################
+# Redis  —  in-cluster cache for Cart Service
+# Using a simple Deployment (not StatefulSet) — acceptable for a demo.
+# Replace with ElastiCache Redis for a true production workload.
+###############################################################################
+redis:
+  enabled: true
+  image: "redis:alpine"
+  port: 6379
+  resources:
+    requests:
+      cpu: "70m"
+      memory: "200Mi"
+    limits:
+      cpu: "125m"
+      memory: "256Mi"
+
+###############################################################################
+# Ingress — AWS Application Load Balancer via the AWS LBC
+###############################################################################
+ingress:
+  enabled: true
+  # The aws-load-balancer-controller watches for this class.
+  className: alb
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing     # public ALB
+    alb.ingress.kubernetes.io/target-type: ip             # route directly to pod IPs (no NodePort hop)
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: "/_healthz"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"
+    alb.ingress.kubernetes.io/success-codes: "200"
+    # Uncomment to enable HTTPS with ACM:
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:ACCOUNT:certificate/CERT_ID
+    # alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    # alb.ingress.kubernetes.io/ssl-redirect: "443"
+  host: ""   # leave blank → ALB DNS name is used automatically

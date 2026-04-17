@@ -1,0 +1,13 @@
+{{/*
+  templates/namespace.yaml
+  Creates the Kubernetes namespace before any other resource.
+  Helm deploys resources in dependency order, and Namespace is always first.
+*/}}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: online-boutique

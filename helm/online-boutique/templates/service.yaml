@@ -1,0 +1,51 @@
+{{/*
+  templates/service.yaml
+  Renders one ClusterIP Service per entry in .Values.services.
+  All inter-service gRPC traffic stays inside the cluster on ClusterIP.
+  Only the frontend is exposed externally via the Ingress (ingress.yaml).
+*/}}
+{{- range $name, $svc := .Values.services }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Values.global.namespace }}
+  labels:
+    app: {{ $name }}
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/part-of: online-boutique
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ $name }}
+  ports:
+    - name: grpc
+      port: {{ $svc.port }}
+      targetPort: {{ $svc.port }}
+      protocol: TCP
+{{- end }}
+
+{{/*
+  Redis Service
+*/}}
+{{- if .Values.redis.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-cart
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: redis-cart
+    app.kubernetes.io/part-of: online-boutique
+spec:
+  type: ClusterIP
+  selector:
+    app: redis-cart
+  ports:
+    - name: redis
+      port: {{ .Values.redis.port }}
+      targetPort: {{ .Values.redis.port }}
+      protocol: TCP
+{{- end }}

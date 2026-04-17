@@ -1,0 +1,16 @@
+apiVersion: v2
+name: online-boutique
+description: >
+  Online Boutique — a cloud-native microservices demo application,
+  migrated from GCP to AWS EKS by GaganPal27.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - microservices
+  - aws
+  - eks
+  - grpc
+maintainers:
+  - name: GaganPal27
+    url: https://github.com/GaganPal27/online-boutique-aws

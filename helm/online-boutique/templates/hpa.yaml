@@ -1,0 +1,36 @@
+{{/*
+  templates/hpa.yaml
+  Horizontal Pod Autoscaler for each service.
+  Scales between replicas (min) and 2x replicas (max) based on CPU.
+
+  The loadgenerator is excluded — it intentionally runs at fixed scale.
+  Redis is excluded — it is stateful and should be scaled manually.
+*/}}
+{{- $excluded := list "loadgenerator" }}
+{{- range $name, $svc := .Values.services }}
+{{- if not (has $name $excluded) }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Values.global.namespace }}
+  labels:
+    app: {{ $name }}
+    app.kubernetes.io/part-of: online-boutique
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $name }}
+  minReplicas: {{ $svc.replicas }}
+  maxReplicas: {{ mul $svc.replicas 2 }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60   # scale out when CPU > 60%
+{{- end }}
+{{- end }}

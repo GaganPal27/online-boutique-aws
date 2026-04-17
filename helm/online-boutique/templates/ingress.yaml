@@ -1,0 +1,42 @@
+{{/*
+  templates/ingress.yaml
+  Creates an AWS Application Load Balancer via the AWS Load Balancer Controller.
+
+  Key decisions:
+    scheme: internet-facing  → public-facing ALB in the public subnets
+    target-type: ip          → routes directly to pod IPs, skipping NodePort.
+                               Requires VPC CNI (which we configured in eks.tf).
+    healthcheck-path: /_healthz → the frontend's built-in health endpoint.
+*/}}
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: online-boutique
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/name: online-boutique
+    app.kubernetes.io/part-of: online-boutique
+  annotations:
+    {{- range $key, $value := .Values.ingress.annotations }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    # If ingress.host is blank, the ALB's auto-assigned DNS name is used.
+    # Set ingress.host to your custom domain once you have a Route 53 record.
+    - {{- if .Values.ingress.host }}
+      host: {{ .Values.ingress.host }}
+      {{- end }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: {{ .Values.services.frontend.port }}
+{{- end }}

@@ -1,0 +1,200 @@
+###############################################################################
+# .github/workflows/deploy.yml
+#
+# Phase 5 — Deploy to EKS via Helm
+#
+# Trigger: runs AFTER build-and-push.yml succeeds on main.
+# This creates a clean two-stage pipeline:
+#   Stage 1 (build-and-push.yml) → build Docker images, push to ECR
+#   Stage 2 (deploy.yml)         → helm upgrade the cluster with new image SHAs
+#
+# Pro techniques demonstrated:
+#   1. workflow_run trigger   — deploy only fires after a successful build
+#   2. OIDC auth             — same zero-secret pattern as the build pipeline
+#   3. Per-service SHA tags  — each service is upgraded to its exact commit SHA
+#   4. Atomic Helm upgrade   — --atomic rolls back automatically on failure
+#   5. Smoke test            — verifies all pods reach Running before finishing
+###############################################################################
+
+name: Deploy to EKS
+
+on:
+  # Fire automatically after the build pipeline succeeds on main.
+  workflow_run:
+    workflows: ["Build and Push to ECR"]
+    types:
+      - completed
+    branches:
+      - main
+
+  # Allow a manual deploy from the Actions tab (e.g. for hotfixes).
+  workflow_dispatch:
+
+###############################################################################
+# Permissions — OIDC token needed to assume the IAM role
+###############################################################################
+permissions:
+  id-token: write
+  contents: read
+
+###############################################################################
+# Environment — mirrors the values used in build-and-push.yml
+###############################################################################
+env:
+  AWS_REGION: us-east-1
+  CLUSTER_NAME: online-boutique-eks
+  HELM_RELEASE: online-boutique
+  HELM_NAMESPACE: online-boutique
+  HELM_CHART_PATH: helm/online-boutique
+  ECR_NAMESPACE: online-boutique
+
+jobs:
+  deploy:
+    name: Helm Deploy → EKS
+    runs-on: ubuntu-latest
+
+    # Only proceed if the triggering build workflow actually succeeded.
+    # (workflow_run fires even on failure; this guard prevents bad deploys.)
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout — needed to read the Helm chart from helm/online-boutique/
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # 2. Configure AWS credentials via OIDC
+      #    Uses the same AWS_ROLE_ARN secret set up in Phase 3.
+      #    The role already has ECR push/pull permissions.
+      #    We add EKS permissions below in a separate policy (see note).
+      # -----------------------------------------------------------------------
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: GitHubActions-Deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # -----------------------------------------------------------------------
+      # 3. Authenticate kubectl against the EKS cluster
+      # -----------------------------------------------------------------------
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.CLUSTER_NAME }}
+
+      # -----------------------------------------------------------------------
+      # 4. Install Helm (v3.14 — matches the chart apiVersion: v2)
+      # -----------------------------------------------------------------------
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "v3.14.0"
+
+      # -----------------------------------------------------------------------
+      # 5. Install / upgrade the AWS Load Balancer Controller
+      #    This is idempotent — safe to re-run on every deploy.
+      #    The LBC must exist BEFORE the Ingress is created, or the ALB
+      #    will never be provisioned.
+      # -----------------------------------------------------------------------
+      - name: Add EKS Helm repo
+        run: |
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update
+
+      - name: Install AWS Load Balancer Controller
+        run: |
+          helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+            --namespace kube-system \
+            --set clusterName=${{ env.CLUSTER_NAME }} \
+            --set serviceAccount.create=true \
+            --set serviceAccount.name=aws-load-balancer-controller \
+            --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=${{ secrets.AWS_LBC_ROLE_ARN }} \
+            --wait \
+            --timeout 5m
+
+      # -----------------------------------------------------------------------
+      # 6. Resolve the ECR registry URL dynamically (no hardcoded account ID)
+      # -----------------------------------------------------------------------
+      - name: Resolve ECR registry URL
+        id: ecr
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          REGISTRY="${ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          echo "registry=${REGISTRY}" >> $GITHUB_OUTPUT
+
+      # -----------------------------------------------------------------------
+      # 7. Helm upgrade — deploy all 11 services
+      #
+      #    Key flags:
+      #      --install      → creates the release if it doesn't exist
+      #      --atomic       → rolls back automatically on failure
+      #      --timeout 10m  → enough time for ECR image pulls on cold nodes
+      #      --set          → override each service's image tag with the Git SHA
+      #                       so every service is pinned to an exact, traceable build
+      # -----------------------------------------------------------------------
+      - name: Helm upgrade — Online Boutique
+        run: |
+          SHA="${{ github.sha }}"
+
+          helm upgrade --install ${{ env.HELM_RELEASE }} ${{ env.HELM_CHART_PATH }} \
+            --namespace ${{ env.HELM_NAMESPACE }} \
+            --create-namespace \
+            --atomic \
+            --timeout 10m \
+            --set global.imageRegistry=${{ steps.ecr.outputs.registry }} \
+            --set services.frontend.image.tag=${SHA} \
+            --set services.cartservice.image.tag=${SHA} \
+            --set services.productcatalogservice.image.tag=${SHA} \
+            --set services.currencyservice.image.tag=${SHA} \
+            --set services.paymentservice.image.tag=${SHA} \
+            --set services.shippingservice.image.tag=${SHA} \
+            --set services.emailservice.image.tag=${SHA} \
+            --set services.checkoutservice.image.tag=${SHA} \
+            --set services.recommendationservice.image.tag=${SHA} \
+            --set services.adservice.image.tag=${SHA} \
+            --set services.loadgenerator.image.tag=${SHA}
+
+      # -----------------------------------------------------------------------
+      # 8. Smoke test — wait for all deployments to be fully Available
+      # -----------------------------------------------------------------------
+      - name: Smoke test — wait for rollout
+        run: |
+          SERVICES=(
+            frontend cartservice productcatalogservice currencyservice
+            paymentservice shippingservice emailservice checkoutservice
+            recommendationservice adservice loadgenerator
+          )
+          for svc in "${SERVICES[@]}"; do
+            echo "⏳ Waiting for deployment/${svc} ..."
+            kubectl rollout status deployment/${svc} \
+              --namespace ${{ env.HELM_NAMESPACE }} \
+              --timeout 5m
+            echo "✅ ${svc} is ready"
+          done
+
+      # -----------------------------------------------------------------------
+      # 9. Print the ALB DNS name so you can open the app immediately
+      # -----------------------------------------------------------------------
+      - name: Print ALB endpoint
+        run: |
+          echo "⏳ Fetching ALB DNS name (may take 60s for ALB to provision)..."
+          sleep 30
+          ALB_URL=$(kubectl get ingress online-boutique \
+            --namespace ${{ env.HELM_NAMESPACE }} \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+          echo "### 🚀 Online Boutique is live!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **URL** | http://${ALB_URL} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit SHA** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Namespace** | \`${{ env.HELM_NAMESPACE }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Open: http://${ALB_URL}"
