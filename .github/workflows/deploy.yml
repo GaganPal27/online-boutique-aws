@@ -19,7 +19,9 @@
 name: Deploy to EKS
 
 on:
-  # Fire automatically after the build pipeline succeeds on main.
+  push:
+    branches:
+      - main
   workflow_run:
     workflows: ["Build and Push to ECR"]
     types:
