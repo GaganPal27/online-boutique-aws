@@ -57,9 +57,6 @@ jobs:
 
     # Only proceed if the triggering build workflow actually succeeded.
     # (workflow_run fires even on failure; this guard prevents bad deploys.)
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
 
     steps:
       # -----------------------------------------------------------------------
